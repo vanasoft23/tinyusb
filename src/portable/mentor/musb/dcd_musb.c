@@ -29,6 +29,8 @@
 
 #if CFG_TUD_ENABLED && defined(TUP_USBIP_MUSB)
 
+#include <stddef.h>
+
 #define MUSB_DEBUG 2
 #define MUSB_REGS(rhport)   ((musb_regs_t*) MUSB_BASES[rhport])
 
@@ -40,6 +42,8 @@
 // - musb_dcd_int_handler_enter/exit
 #if defined(TUP_USBIP_MUSB_TI)
   #include "musb_ti.h"
+#elif defined(TUP_USBIP_MUSB_AM1802)
+  #include "musb_am1802.h"
 #elif defined(TUP_USBIP_MUSB_ADI)
   #include "musb_max32.h"
 #else
@@ -99,8 +103,9 @@ typedef struct {
   uint8_t  pending_addr;    // new USB address latched by dcd_set_address; applied when STATUS IN completes
   bool     rxrdy_consumed;  // RxPktRdy left set in hw for an already-consumed packet (NAK flow control);
                             // RXRDY events are stale while set. Cleared when RXRDYC is written.
+  bool     status_out_auto_complete;
   bool     deferred_setup_valid;
-  uint32_t deferred_setup[2];  // raw SETUP words, replayed via pipe0_start_setup
+  tusb_control_request_t deferred_setup;  // decoded SETUP request replayed via pipe0_start_setup
 } pipe0_state_t;
 
 typedef struct {
@@ -110,26 +115,247 @@ typedef struct {
 
 static dcd_data_t _dcd;
 
-// Read the 8-byte SETUP packet (2 words) from the EP0 FIFO into setup[]. Does not ack RxPktRdy.
-static bool pipe0_read_setup(musb_regs_t* musb_regs, musb_ep_csr_t* ep_csr, uint32_t setup[2]) {
+TU_ATTR_USED volatile uint32_t musb_dcd_bus_reset_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_setup_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_raw0;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_raw1;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte0;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte1;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte2;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte3;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte4;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte5;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte6;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_byte7;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup0;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup1;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_bm_request_type;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_b_request;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_w_value;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_w_index;
+TU_ATTR_USED volatile uint32_t musb_dcd_last_setup_w_length;
+TU_ATTR_USED volatile uint32_t musb_dcd_ignored_sof_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_last_ep_addr;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_last_len;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_last_state_before;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_last_state_after;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_last_csr0l;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_last_remain_wlength;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_xfer_last_result;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_isr_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_isr_last_csrl;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_isr_last_count0;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_isr_last_state;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_process_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_process_state_before;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_process_state_after;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_dataend_ignored_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_dataend_processed_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_status_out_zlp_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_status_out_auto_complete_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_status_out_auto_xfer_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_stalled_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_setupend_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_stall_request_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_stall_last_ep_addr;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_deferred_setup_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_replayed_setup_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_ep0_state_current;
+TU_ATTR_USED volatile uint32_t musb_dcd_set_address_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_set_address_last;
+TU_ATTR_USED volatile uint32_t musb_dcd_address_applied_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_faddr_last;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_handoff_magic;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_bm_request_type;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_b_request;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_w_value;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_w_index;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_w_length;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte0;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte1;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte2;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte3;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte4;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte5;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte6;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_byte7;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_raw0;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_raw1;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_raw2;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_size;
+TU_ATTR_USED volatile uint32_t musb_dcd_event_setup_offset;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_ep_addr;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_mps;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_xfer;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_is_rx;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_csrh;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_double_packet;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_intr_txen;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_open_last_intr_rxen;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_xfer_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_xfer_last_ep_addr;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_xfer_last_len;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_xfer_last_is_fifo;
+TU_ATTR_USED volatile uint32_t musb_dcd_edpt_xfer_last_result;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_last_write_len;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_last_write_word0;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_last_write_word1;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_isr_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_last_epnum;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_last_csrl;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_last_xferred;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_complete_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_fifone_wait_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epin_stalled_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_isr_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_last_epnum;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_last_csrl;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_last_rx_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_last_packet_offset;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_last_word0;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_last_word1;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_last_xferred;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_complete_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_no_buffer_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_no_rxrdy_count;
+TU_ATTR_USED volatile uint32_t musb_dcd_epout_stalled_count;
+
+enum {
+  MUSB_DCD_EVENT_SETUP_OFFSET = offsetof(dcd_event_t, setup_received)
+};
+
+TU_VERIFY_STATIC(MUSB_DCD_EVENT_SETUP_OFFSET == 4u, "Unexpected dcd_event_t setup offset");
+TU_VERIFY_STATIC(sizeof(dcd_event_t) >= MUSB_DCD_EVENT_SETUP_OFFSET + sizeof(tusb_control_request_t),
+                 "dcd_event_t is too small for setup event");
+
+static void pipe0_setup_to_wire_bytes(tusb_control_request_t const* setup, uint8_t setup8[8]) {
+  setup8[0] = setup->bmRequestType;
+  setup8[1] = setup->bRequest;
+  setup8[2] = (uint8_t)(setup->wValue & 0xffu);
+  setup8[3] = (uint8_t)((setup->wValue >> 8) & 0xffu);
+  setup8[4] = (uint8_t)(setup->wIndex & 0xffu);
+  setup8[5] = (uint8_t)((setup->wIndex >> 8) & 0xffu);
+  setup8[6] = (uint8_t)(setup->wLength & 0xffu);
+  setup8[7] = (uint8_t)((setup->wLength >> 8) & 0xffu);
+}
+
+static void pipe0_record_setup_bytes(uint8_t const setup8[8]) {
+  musb_dcd_last_setup_byte0 = setup8[0];
+  musb_dcd_last_setup_byte1 = setup8[1];
+  musb_dcd_last_setup_byte2 = setup8[2];
+  musb_dcd_last_setup_byte3 = setup8[3];
+  musb_dcd_last_setup_byte4 = setup8[4];
+  musb_dcd_last_setup_byte5 = setup8[5];
+  musb_dcd_last_setup_byte6 = setup8[6];
+  musb_dcd_last_setup_byte7 = setup8[7];
+}
+
+static void pipe0_emit_setup_event(uint8_t rhport, tusb_control_request_t const* setup, bool is_isr) {
+  dcd_event_t event = { 0 };
+  uint8_t const setup8[8] = {
+      setup->bmRequestType,
+      setup->bRequest,
+      (uint8_t)(setup->wValue & 0xffu),
+      (uint8_t)((setup->wValue >> 8) & 0xffu),
+      (uint8_t)(setup->wIndex & 0xffu),
+      (uint8_t)((setup->wIndex >> 8) & 0xffu),
+      (uint8_t)(setup->wLength & 0xffu),
+      (uint8_t)((setup->wLength >> 8) & 0xffu),
+  };
+  uint8_t* const event_bytes = (uint8_t*) &event;
+  uint8_t* const setup_bytes = event_bytes + MUSB_DCD_EVENT_SETUP_OFFSET;
+
+  event_bytes[0] = rhport;
+  event_bytes[1] = DCD_EVENT_SETUP_RECEIVED;
+  memcpy(setup_bytes, setup8, sizeof(setup8));
+
+  musb_dcd_event_handoff_magic = 0xe0000000u |
+                                 ((uint32_t) DCD_EVENT_SETUP_RECEIVED << 16) |
+                                 ((uint32_t) setup_bytes[0] << 8) |
+                                 setup_bytes[1];
+  musb_dcd_event_setup_count++;
+  musb_dcd_event_setup_bm_request_type = setup_bytes[0];
+  musb_dcd_event_setup_b_request = setup_bytes[1];
+  musb_dcd_event_setup_w_value = tu_u16(setup_bytes[3], setup_bytes[2]);
+  musb_dcd_event_setup_w_index = tu_u16(setup_bytes[5], setup_bytes[4]);
+  musb_dcd_event_setup_w_length = tu_u16(setup_bytes[7], setup_bytes[6]);
+  musb_dcd_event_setup_byte0 = setup_bytes[0];
+  musb_dcd_event_setup_byte1 = setup_bytes[1];
+  musb_dcd_event_setup_byte2 = setup_bytes[2];
+  musb_dcd_event_setup_byte3 = setup_bytes[3];
+  musb_dcd_event_setup_byte4 = setup_bytes[4];
+  musb_dcd_event_setup_byte5 = setup_bytes[5];
+  musb_dcd_event_setup_byte6 = setup_bytes[6];
+  musb_dcd_event_setup_byte7 = setup_bytes[7];
+  musb_dcd_event_raw0 = tu_u32(event_bytes[3], event_bytes[2], event_bytes[1], event_bytes[0]);
+  musb_dcd_event_raw1 = tu_u32(event_bytes[7], event_bytes[6], event_bytes[5], event_bytes[4]);
+  musb_dcd_event_raw2 = tu_u32(event_bytes[11], event_bytes[10], event_bytes[9], event_bytes[8]);
+  musb_dcd_event_size = sizeof(event);
+  musb_dcd_event_setup_offset = MUSB_DCD_EVENT_SETUP_OFFSET;
+
+  dcd_event_handler(&event, is_isr);
+}
+
+// Read the 8-byte SETUP packet from the EP0 FIFO. Does not ack RxPktRdy.
+static bool pipe0_read_setup(musb_regs_t* musb_regs, musb_ep_csr_t* ep_csr, tusb_control_request_t* setup) {
   TU_ASSERT(sizeof(tusb_control_request_t) == ep_csr->count0);
-  setup[0] = musb_regs->fifo[0];
-  setup[1] = musb_regs->fifo[0];
+#if defined(TUP_USBIP_MUSB_AM1802)
+  uint32_t const raw0 = musb_regs->fifo[0];
+  uint32_t const raw1 = musb_regs->fifo[0];
+
+  musb_dcd_last_setup_raw0 = raw0;
+  musb_dcd_last_setup_raw1 = raw1;
+
+  setup->bmRequestType = (uint8_t)((raw0 >> 0) & 0xffu);
+  setup->bRequest = (uint8_t)((raw0 >> 8) & 0xffu);
+  setup->wValue = tu_u16((uint8_t)((raw0 >> 24) & 0xffu),
+                         (uint8_t)((raw0 >> 16) & 0xffu));
+  setup->wIndex = tu_u16((uint8_t)((raw1 >> 8) & 0xffu),
+                         (uint8_t)((raw1 >> 0) & 0xffu));
+  setup->wLength = tu_u16((uint8_t)((raw1 >> 24) & 0xffu),
+                          (uint8_t)((raw1 >> 16) & 0xffu));
+#else
+  tu_hwfifo_read(&musb_regs->fifo[0], (uint8_t*)setup, sizeof(tusb_control_request_t), NULL);
+#endif
+
+  uint8_t setup8[8];
+  pipe0_setup_to_wire_bytes(setup, setup8);
+  pipe0_record_setup_bytes(setup8);
   return true;
 }
 
 static void pipe0_start_setup(uint8_t rhport, musb_ep_csr_t* ep_csr,
-                              const uint32_t setup[2], bool is_isr) {
-  tusb_control_request_t const* req = (tusb_control_request_t const*) setup;
-  pipe0_state_t* pipe0 = &_dcd.pipe0;
-  pipe0->remain_wlength = req->wLength;
+                              tusb_control_request_t const* setup, bool is_isr) {
+  uint8_t setup8[8];
+  pipe0_setup_to_wire_bytes(setup, setup8);
 
-  if (req->wLength == 0) {
+  uint8_t const req_bm_request_type = setup->bmRequestType;
+  uint8_t const req_b_request = setup->bRequest;
+  uint16_t const req_w_value = setup->wValue;
+  uint16_t const req_w_index = setup->wIndex;
+  uint16_t const req_w_length = setup->wLength;
+  pipe0_state_t* pipe0 = &_dcd.pipe0;
+
+  musb_dcd_setup_count++;
+  musb_dcd_last_setup0 = tu_u32(setup8[3], setup8[2], setup8[1], setup8[0]);
+  musb_dcd_last_setup1 = tu_u32(setup8[7], setup8[6], setup8[5], setup8[4]);
+  musb_dcd_last_setup_bm_request_type = req_bm_request_type;
+  musb_dcd_last_setup_b_request = req_b_request;
+  musb_dcd_last_setup_w_value = req_w_value;
+  musb_dcd_last_setup_w_index = req_w_index;
+  musb_dcd_last_setup_w_length = req_w_length;
+
+  pipe0->remain_wlength = req_w_length;
+
+  if (req_w_length == 0) {
     // Leave RXRDY set; edpt0_xfer(STATUS IN) acks it together with DATAEND.
     pipe0->state = PIPE0_STATE_STATUS_IN;
     pipe0->rxrdy_consumed = true;
   } else {
-    if (req->bmRequestType & TUSB_DIR_IN_MASK) {
+    if (req_bm_request_type & TUSB_DIR_IN_MASK) {
       pipe0->state = PIPE0_STATE_DATA_IN;
       // On a deferred replay the packet's RXRDY stays parked until the edpt0_xfer(DATA IN) arm
       // acks it — a stale latched EP0 IRQ in between is gated by rxrdy_consumed.
@@ -145,7 +371,8 @@ static void pipe0_start_setup(uint8_t rhport, musb_ep_csr_t* ep_csr,
     }
   }
 
-  dcd_event_setup_received(rhport, (const uint8_t *) setup, is_isr);
+  musb_dcd_ep0_state_current = pipe0->state;
+  pipe0_emit_setup_event(rhport, setup, is_isr);
 }
 
 // Replay a previously deferred SETUP, if any.
@@ -156,12 +383,19 @@ static void pipe0_try_deferred_setup(uint8_t rhport, musb_ep_csr_t* ep_csr, bool
   }
 
   pipe0->deferred_setup_valid = false;
-  pipe0_start_setup(rhport, ep_csr, pipe0->deferred_setup, is_isr);
+  musb_dcd_ep0_replayed_setup_count++;
+  pipe0_start_setup(rhport, ep_csr, &pipe0->deferred_setup, is_isr);
 }
 
 // Last DATA packet: wLength satisfied, or a short packet (incl. ZLP) ends the stage.
 TU_ATTR_ALWAYS_INLINE static inline bool pipe0_data_stage_done(uint16_t xfer_len) {
   return _dcd.pipe0.remain_wlength == 0 || xfer_len < CFG_TUD_ENDPOINT0_SIZE;
+}
+
+TU_ATTR_ALWAYS_INLINE static inline bool pipe0_waiting_status_out(const pipe0_state_t* pipe0) {
+  return pipe0->state == PIPE0_STATE_STATUS_OUT ||
+         pipe0->state == PIPE0_STATE_STATUS_OUT_PENDING_XFER ||
+         pipe0->state == PIPE0_STATE_STATUS_OUT_PENDING_IRQ;
 }
 
 // EP0 must not call this — it has its own scalars in dcd_data_t.
@@ -281,6 +515,69 @@ TU_ATTR_ALWAYS_INLINE static inline void hwfifo_flush(musb_regs_t* musb, unsigne
   }
 }
 
+#if defined(TUP_USBIP_MUSB_AM1802)
+static void musb_fifo_write_bytes(volatile void* hwfifo, uint8_t const* src, uint16_t len) {
+  volatile uint8_t* fifo8 = (volatile uint8_t*) hwfifo;
+  while (len--) {
+    *fifo8 = *src++;
+  }
+}
+
+static void musb_fifo_read_bytes(const volatile void* hwfifo, uint8_t* dst, uint16_t len) {
+  const volatile uint8_t* fifo8 = (const volatile uint8_t*) hwfifo;
+  while (len--) {
+    *dst++ = *fifo8;
+  }
+}
+
+static void musb_fifo_write_from_fifo(volatile void* hwfifo, tu_fifo_t* fifo, uint16_t len) {
+  volatile uint8_t* fifo8 = (volatile uint8_t*) hwfifo;
+  uint8_t byte;
+  uint16_t count = tu_min16(len, tu_fifo_count(fifo));
+  while (count--) {
+    (void) tu_fifo_read(fifo, &byte);
+    *fifo8 = byte;
+  }
+}
+
+static void musb_fifo_read_to_fifo(const volatile void* hwfifo, tu_fifo_t* fifo, uint16_t len) {
+  const volatile uint8_t* fifo8 = (const volatile uint8_t*) hwfifo;
+  uint8_t byte;
+  uint16_t count = tu_min16(len, tu_fifo_remaining(fifo));
+  while (count--) {
+    byte = *fifo8;
+    (void) tu_fifo_write(fifo, &byte);
+  }
+}
+#else
+TU_ATTR_ALWAYS_INLINE static inline void musb_fifo_write_bytes(volatile void* hwfifo, uint8_t const* src, uint16_t len) {
+  tu_hwfifo_write(hwfifo, src, len, NULL);
+}
+
+TU_ATTR_ALWAYS_INLINE static inline void musb_fifo_read_bytes(const volatile void* hwfifo, uint8_t* dst, uint16_t len) {
+  tu_hwfifo_read(hwfifo, dst, len, NULL);
+}
+
+TU_ATTR_ALWAYS_INLINE static inline void musb_fifo_write_from_fifo(volatile void* hwfifo, tu_fifo_t* fifo, uint16_t len) {
+  (void) tu_hwfifo_write_from_fifo(hwfifo, fifo, len, NULL);
+}
+
+TU_ATTR_ALWAYS_INLINE static inline void musb_fifo_read_to_fifo(const volatile void* hwfifo, tu_fifo_t* fifo, uint16_t len) {
+  (void) tu_hwfifo_read_to_fifo(hwfifo, fifo, len, NULL);
+}
+#endif
+
+static uint32_t musb_le32_from_bytes(uint8_t const* data, uint16_t len) {
+  uint32_t value = 0;
+  uint16_t const count = tu_min16(len, 4);
+
+  for (uint16_t i = 0; i < count; i++) {
+    value |= ((uint32_t)data[i]) << (8u * i);
+  }
+
+  return value;
+}
+
 // write to txfifo using pipe_state_t info
 static void pipe_write(musb_regs_t* musb_regs, pipe_state_t* pipe, uint8_t epnum) {
   musb_ep_csr_t* ep_csr = &musb_regs->indexed_csr;
@@ -289,11 +586,14 @@ static void pipe_write(musb_regs_t* musb_regs, pipe_state_t* pipe, uint8_t epnum
   volatile void *hwfifo = &musb_regs->fifo[epnum];
   if (xact_len) {
     if (pipe->use_fifo) {
-      tu_hwfifo_write_from_fifo(hwfifo, pipe->fifo, xact_len, NULL);
+      musb_fifo_write_from_fifo(hwfifo, pipe->fifo, xact_len);
     } else {
-      tu_hwfifo_write(hwfifo, pipe->buf, xact_len, NULL);
+      musb_dcd_epin_last_write_word0 = musb_le32_from_bytes(pipe->buf, xact_len);
+      musb_dcd_epin_last_write_word1 = musb_le32_from_bytes(pipe->buf + tu_min16(xact_len, 4), (uint16_t)(xact_len > 4 ? xact_len - 4 : 0));
+      musb_fifo_write_bytes(hwfifo, pipe->buf, xact_len);
       pipe->buf += xact_len;
     }
+    musb_dcd_epin_last_write_len = xact_len;
     pipe->remaining -= xact_len;
   }
   ep_csr->tx_csrl = MUSB_TXCSRL1_TXRDY;
@@ -304,7 +604,11 @@ static void pipe_write(musb_regs_t* musb_regs, pipe_state_t* pipe, uint8_t epnum
 static void process_epin_isr(uint8_t rhport, musb_regs_t *musb_regs, uint8_t epnum) {
   musb_ep_csr_t* ep_csr = get_ep_csr(musb_regs, epnum);
   const uint_fast8_t csrl = ep_csr->tx_csrl;
+  musb_dcd_epin_isr_count++;
+  musb_dcd_epin_last_epnum = epnum;
+  musb_dcd_epin_last_csrl = csrl;
   if (csrl & MUSB_TXCSRL1_STALLED) {
+    musb_dcd_epin_stalled_count++;
     ep_csr->tx_csrl &= ~(MUSB_TXCSRL1_STALLED | MUSB_TXCSRL1_UNDRN);
     return; // sent STALL, do nothing
   }
@@ -319,9 +623,12 @@ static void process_epin_isr(uint8_t rhport, musb_regs_t *musb_regs, uint8_t epn
     // transfer finishes). Defer completion until FIFONE == 0 so we don't emit
     // a duplicate xfer_complete before the final packet has been sent.
     if (csrl & MUSB_TXCSRL1_FIFONE) {
+      musb_dcd_epin_fifone_wait_count++;
       return;
     }
     const uint16_t xferred_len = pipe->length;
+    musb_dcd_epin_last_xferred = xferred_len;
+    musb_dcd_epin_complete_count++;
     pipe->buf = NULL;
     pipe->armed = false;
     dcd_event_xfer_complete(rhport, tu_edpt_addr(epnum, TUSB_DIR_IN), xferred_len, XFER_RESULT_SUCCESS, true);
@@ -338,9 +645,14 @@ static bool pipe_read(musb_regs_t* musb_regs, pipe_state_t* pipe, uint8_t epnum)
   volatile void *hwfifo = &musb_regs->fifo[epnum];
   if (xact_len) {
     if (pipe->use_fifo) {
-      tu_hwfifo_read_to_fifo(hwfifo, pipe->fifo, xact_len, NULL);
+      musb_fifo_read_to_fifo(hwfifo, pipe->fifo, xact_len);
     } else {
-      tu_hwfifo_read(hwfifo, pipe->buf, xact_len, NULL);
+      uint32_t const packet_offset = pipe->length - pipe->remaining;
+
+      musb_fifo_read_bytes(hwfifo, pipe->buf, xact_len);
+      musb_dcd_epout_last_packet_offset = packet_offset;
+      musb_dcd_epout_last_word0 = musb_le32_from_bytes(pipe->buf, xact_len);
+      musb_dcd_epout_last_word1 = musb_le32_from_bytes(pipe->buf + tu_min16(xact_len, 4), (uint16_t)(xact_len > 4 ? xact_len - 4 : 0));
       pipe->buf += xact_len;
     }
     pipe->remaining -= xact_len;
@@ -352,18 +664,25 @@ static bool pipe_read(musb_regs_t* musb_regs, pipe_state_t* pipe, uint8_t epnum)
 
 static void process_epout_isr(uint8_t rhport, musb_regs_t *musb_regs, uint8_t epnum, bool is_isr) {
   musb_ep_csr_t* ep_csr = get_ep_csr(musb_regs, epnum);
+  musb_dcd_epout_isr_count++;
+  musb_dcd_epout_last_epnum = epnum;
+  musb_dcd_epout_last_csrl = ep_csr->rx_csrl;
+  musb_dcd_epout_last_rx_count = ep_csr->rx_count;
   if (ep_csr->rx_csrl & MUSB_RXCSRL1_STALLED) {
+    musb_dcd_epout_stalled_count++;
     ep_csr->rx_csrl &= ~(MUSB_RXCSRL1_STALLED | MUSB_RXCSRL1_OVER);
     return; // sent STALL, do nothing
   }
 
   // Fail gracefully. Spurious interrupt.
   if (!(ep_csr->rx_csrl & MUSB_RXCSRL1_RXRDY)) {
+    musb_dcd_epout_no_rxrdy_count++;
     return;
   }
 
   pipe_state_t *pipe = pipe_get(epnum, TUSB_DIR_OUT);
   if (!pipe->armed) {
+    musb_dcd_epout_no_buffer_count++;
     // Packet is already ACK'd by hardware and sitting in the Rx FIFO, but no transfer is
     // posted. Do NOT flush (per MUSB spec §3.3.11 FlushFIFO) - that would silently drop
     // acknowledged data. Mask this endpoint's Rx interrupt so the ISR stops re-firing;
@@ -378,6 +697,8 @@ static void process_epout_isr(uint8_t rhport, musb_regs_t *musb_regs, uint8_t ep
   // Transfer completes on a short packet or when the rx buffer is filled.
   if (is_short || pipe->remaining == 0) {
     const uint16_t xferred_len = pipe->length - pipe->remaining;
+    musb_dcd_epout_last_xferred = xferred_len;
+    musb_dcd_epout_complete_count++;
     pipe->buf = NULL;
     pipe->armed = false;
     dcd_event_xfer_complete(rhport, epnum, xferred_len, XFER_RESULT_SUCCESS, is_isr);
@@ -398,6 +719,10 @@ static bool edpt_n_xfer(uint8_t rhport, uint8_t ep_addr, void *buffer, uint16_t 
   pipe->remaining = total_bytes;
   pipe->use_fifo  = use_fifo;
   pipe->armed     = true;
+  musb_dcd_edpt_xfer_count++;
+  musb_dcd_edpt_xfer_last_ep_addr = ep_addr;
+  musb_dcd_edpt_xfer_last_len = total_bytes;
+  musb_dcd_edpt_xfer_last_is_fifo = use_fifo ? 1u : 0u;
 
   musb_regs_t   *musb_regs = MUSB_REGS(rhport);
   musb_ep_csr_t *ep_csr    = get_ep_csr(musb_regs, epnum);
@@ -414,6 +739,7 @@ static bool edpt_n_xfer(uint8_t rhport, uint8_t ep_addr, void *buffer, uint16_t 
       process_epout_isr(rhport, musb_regs, epnum, is_isr);
     }
   }
+  musb_dcd_edpt_xfer_last_result = 1u;
   return true;
 }
 
@@ -424,6 +750,12 @@ static bool edpt0_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer, uint16_
   pipe0_state_t* pipe0 = &_dcd.pipe0;
   const unsigned dir_in = tu_edpt_dir(ep_addr);
 
+  if (!dir_in && total_bytes == 0 && pipe0->status_out_auto_complete) {
+    pipe0->status_out_auto_complete = false;
+    musb_dcd_ep0_status_out_auto_xfer_count++;
+    return true;
+  }
+
   switch (pipe0->state) {
     // DATA stage exits on its last packet, so state matches the call direction here.
     case PIPE0_STATE_DATA_IN:
@@ -433,7 +765,7 @@ static bool edpt0_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer, uint16_
         ep_csr->csr0l = MUSB_CSRL0_RXRDYC;
         pipe0->rxrdy_consumed = false;
       }
-      tu_hwfifo_write(&musb_regs->fifo[0], buffer, total_bytes, NULL);
+      musb_fifo_write_bytes(&musb_regs->fifo[0], buffer, total_bytes);
       pipe0->remain_wlength -= total_bytes;
       // Add DATAEND on the last packet to end the data stage.
       if (pipe0_data_stage_done(total_bytes)) {
@@ -481,6 +813,8 @@ static bool edpt0_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer, uint16_
 // confirmation combined with a new SETUP (caller sets deferred_setup_valid first). ISR context only.
 static void pipe0_process_xfer_state_isr(uint8_t rhport, musb_regs_t* musb_regs, musb_ep_csr_t* ep_csr) {
   pipe0_state_t* pipe0 = &_dcd.pipe0;
+  musb_dcd_ep0_process_count++;
+  musb_dcd_ep0_process_state_before = pipe0->state;
   switch (pipe0->state) {
     case PIPE0_STATE_DATA_IN:
       if (pipe0_data_stage_done(pipe0->xact_len)) {
@@ -495,12 +829,24 @@ static void pipe0_process_xfer_state_isr(uint8_t rhport, musb_regs_t* musb_regs,
 
     case PIPE0_STATE_STATUS_OUT:
       // Confirmation seen — await edpt0_xfer(STATUS OUT) to fire complete.
-      pipe0->state = PIPE0_STATE_STATUS_OUT_PENDING_IRQ;
+      if (pipe0->deferred_setup_valid) {
+        // The next SETUP proves the old STATUS OUT already completed on the bus,
+        // but TinyUSB has not necessarily posted the status xfer yet. Queue the
+        // status completion before replaying the SETUP so USBD sees ordered events.
+        pipe0->state = PIPE0_STATE_IDLE;
+        pipe0->status_out_auto_complete = true;
+        musb_dcd_ep0_status_out_auto_complete_count++;
+        dcd_event_xfer_complete(rhport, TU_EP0_OUT, 0, XFER_RESULT_SUCCESS, true);
+        pipe0_try_deferred_setup(rhport, ep_csr, true);
+      } else {
+        pipe0->state = PIPE0_STATE_STATUS_OUT_PENDING_IRQ;
+      }
       break;
 
     case PIPE0_STATE_STATUS_OUT_PENDING_XFER:
       // edpt0_xfer(STATUS OUT) already called — fire complete and replay now.
       pipe0->state = PIPE0_STATE_IDLE;
+      musb_dcd_ep0_state_current = pipe0->state;
       dcd_event_xfer_complete(rhport, TU_EP0_OUT, 0, XFER_RESULT_SUCCESS, true);
       pipe0_try_deferred_setup(rhport, ep_csr, true);
       break;
@@ -512,15 +858,20 @@ static void pipe0_process_xfer_state_isr(uint8_t rhport, musb_regs_t* musb_regs,
     case PIPE0_STATE_STATUS_IN:
       if (pipe0->pending_addr) {
         musb_regs->faddr = pipe0->pending_addr;
+        musb_dcd_address_applied_count++;
+        musb_dcd_faddr_last = pipe0->pending_addr;
         pipe0->pending_addr = 0;
       }
       pipe0->state = PIPE0_STATE_IDLE;
+      musb_dcd_ep0_state_current = pipe0->state;
       dcd_event_xfer_complete(rhport, TU_EP0_IN, 0, XFER_RESULT_SUCCESS, true);
       pipe0_try_deferred_setup(rhport, ep_csr, true);
       break;
 
     default: break;
   }
+  musb_dcd_ep0_state_current = pipe0->state;
+  musb_dcd_ep0_process_state_after = pipe0->state;
 }
 
 // 21.1.5: endpoint 0 service routine as peripheral
@@ -530,22 +881,35 @@ static void process_ep0_isr(uint8_t rhport) {
   pipe0_state_t* pipe0 = &_dcd.pipe0;
   uint_fast8_t csrl = ep_csr->csr0l;
 
+  musb_dcd_ep0_isr_count++;
+  musb_dcd_ep0_isr_last_csrl = csrl;
+  musb_dcd_ep0_isr_last_count0 = ep_csr->count0;
+  musb_dcd_ep0_isr_last_state = pipe0->state;
+
   // 21.1.5: SentStall and SetupEnd must be checked before anything else.
   if (csrl & MUSB_CSRL0_STALLED) {
+    musb_dcd_ep0_stalled_count++;
     ep_csr->csr0l = 0;
     pipe0->state = PIPE0_STATE_IDLE;
     pipe0->deferred_setup_valid = false;
     pipe0->rxrdy_consumed = false;
+    pipe0->status_out_auto_complete = false;
+    pipe0->pending_addr = 0;
+    musb_dcd_ep0_state_current = pipe0->state;
     return;
   }
 
   if (csrl & MUSB_CSRL0_SETEND) {
+    musb_dcd_ep0_setupend_count++;
     // Host aborted the current control transfer (new SETUP or premature STATUS).
     // do nothing, it is probably another setup packet, usbd will reset its state.
     ep_csr->csr0l = MUSB_CSRL0_SETENDC;
     pipe0->state = PIPE0_STATE_IDLE;
     pipe0->deferred_setup_valid = false;
     pipe0->rxrdy_consumed = false;
+    pipe0->status_out_auto_complete = false;
+    pipe0->pending_addr = 0;
+    musb_dcd_ep0_state_current = pipe0->state;
     if (!(csrl & MUSB_CSRL0_RXRDY)) {
       return; /* no SETUP waiting behind it */
     }
@@ -553,24 +917,34 @@ static void process_ep0_isr(uint8_t rhport) {
 
   // Receive Data (Setup or OUT)
   if (csrl & MUSB_CSRL0_RXRDY) {
+    const uint16_t count0 = ep_csr->count0;
     if (pipe0->rxrdy_consumed) {
       return; // stale latched IRQ: this RXRDY's packet was already drained
     }
+
+    if ((count0 == 0) && pipe0_waiting_status_out(pipe0)) {
+      // Some MUSB revisions report the host status-OUT ZLP as RXRDY with COUNT0 == 0.
+      // This is the control-transfer confirmation interrupt, not a new SETUP packet.
+      musb_dcd_ep0_status_out_zlp_count++;
+      ep_csr->csr0l = MUSB_CSRL0_RXRDYC;
+      pipe0_process_xfer_state_isr(rhport, musb_regs, ep_csr);
+      return;
+    }
+
     switch (pipe0->state) {
       case PIPE0_STATE_IDLE: {
-        uint32_t setup[2];
-        TU_VERIFY(pipe0_read_setup(musb_regs, ep_csr, setup), );
-        pipe0_start_setup(rhport, ep_csr, setup, true);
+        tusb_control_request_t setup;
+        TU_VERIFY(pipe0_read_setup(musb_regs, ep_csr, &setup), );
+        pipe0_start_setup(rhport, ep_csr, &setup, true);
         break;
       }
 
       case PIPE0_STATE_DATA_OUT: {
         // EP0 OUT is single-packet (TU_ASSERT total_bytes <= EP0_SIZE in edpt0_xfer)
         // so the whole packet drains in one shot.
-        const uint16_t count0 = ep_csr->count0;
         if (count0) {
           TU_ASSERT(pipe0->buf, );
-          tu_hwfifo_read(&musb_regs->fifo[0], pipe0->buf, count0, NULL);
+          musb_fifo_read_bytes(&musb_regs->fifo[0], pipe0->buf, count0);
           pipe0->remain_wlength -= tu_min16(count0, pipe0->remain_wlength); // clamp: host may overrun
         }
         // RXRDY stays set until the next edpt0_xfer arm acks it (NAK flow control):
@@ -593,8 +967,9 @@ static void process_ep0_isr(uint8_t rhport) {
         // Save it, then finish the old transfer's tail event; deferred_setup_valid makes
         // pipe0_process_xfer_state_isr() synthesize the coalesced status confirm and replay the SETUP
         // once the old transfer is retired. Its RXRDY stays parked so a stale IRQ can't re-process it.
-        TU_VERIFY(pipe0_read_setup(musb_regs, ep_csr, pipe0->deferred_setup), );
+        TU_VERIFY(pipe0_read_setup(musb_regs, ep_csr, &pipe0->deferred_setup), );
         pipe0->deferred_setup_valid = true;
+        musb_dcd_ep0_deferred_setup_count++;
         pipe0->rxrdy_consumed = true;
         pipe0_process_xfer_state_isr(rhport, musb_regs, ep_csr);
         break;
@@ -605,11 +980,15 @@ static void process_ep0_isr(uint8_t rhport) {
     return;
   }
 
-  if (csrl & MUSB_CSRL0_DATAEND) {
-    // Last DATA IN chunk / STATUS IN arm wrote TXRDY|DATAEND and the status stage has not completed
-    // yet — nothing to service. DataEnd is CPU-set-only per the CSR access table; whether it ever
-    // reads back 1 is vendor-dependent (on cores where it reads 0 this guard is dead code).
+  if ((csrl & MUSB_CSRL0_DATAEND) && (csrl & MUSB_CSRL0_TXRDY)) {
+    // DATAEND can read back while TXRDY is still set. Wait until the packet has
+    // actually left the FIFO before reporting the DATA IN stage to TinyUSB.
+    musb_dcd_ep0_dataend_ignored_count++;
     return;
+  }
+
+  if ((csrl & MUSB_CSRL0_DATAEND) && (pipe0->state == PIPE0_STATE_DATA_IN)) {
+    musb_dcd_ep0_dataend_processed_count++;
   }
 
   /* When CSRL0 is zero, it means that either
@@ -623,6 +1002,8 @@ static void process_ep0_isr(uint8_t rhport) {
 static void process_bus_reset_isr(uint8_t rhport) {
   musb_regs_t* musb = MUSB_REGS(rhport);
 
+  musb_dcd_bus_reset_count++;
+
 #if MUSB_CFG_DYNAMIC_FIFO
   alloced_fifo_bytes = CFG_TUD_ENDPOINT0_SIZE;
 #endif
@@ -634,6 +1015,9 @@ static void process_bus_reset_isr(uint8_t rhport) {
   pipe0->remain_wlength = 0;
   pipe0->deferred_setup_valid = false;
   pipe0->rxrdy_consumed = false;
+  pipe0->status_out_auto_complete = false;
+  pipe0->pending_addr = 0;
+  musb_dcd_ep0_state_current = pipe0->state;
 
   musb->intr_txen = 1; /* Enable only EP0 */
   musb->intr_rxen = 0;
@@ -680,7 +1064,7 @@ bool dcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   print_musb_info(musb_regs);
 #endif
 
-  musb_regs->intr_usben |= MUSB_IE_SUSPND;
+  musb_regs->intr_usben |= MUSB_IE_RESET | MUSB_IE_RESUME | MUSB_IE_SUSPND;
   musb_dcd_int_clear(rhport);
   musb_dcd_phy_init(rhport);
   dcd_connect(rhport);
@@ -704,10 +1088,13 @@ void dcd_set_address(uint8_t rhport, uint8_t dev_addr)
   musb_ep_csr_t* ep_csr = get_ep_csr(musb_regs, 0);
 
   pipe0_state_t* pipe0 = &_dcd.pipe0;
+  musb_dcd_set_address_count++;
+  musb_dcd_set_address_last = dev_addr;
   pipe0->pending_addr = dev_addr;
   pipe0->buf = NULL;
   pipe0->xact_len = 0;
   pipe0->state = PIPE0_STATE_STATUS_IN;
+  musb_dcd_ep0_state_current = pipe0->state;
   /* Send STATUS IN ZLP with DATAEND; host ACK fires the confirmation IRQ. */
   ep_csr->csr0l = MUSB_CSRL0_RXRDYC | MUSB_CSRL0_DATAEND;
   pipe0->rxrdy_consumed = false;
@@ -768,10 +1155,15 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const * ep_desc) {
   musb_ep_csr_t* ep_csr = get_ep_csr(musb, epn);
   const uint8_t is_rx = (1 - epdir);
   musb_ep_maxp_csr_t* maxp_csr = &ep_csr->maxp_csr[is_rx];
+  bool double_packet = ep_desc->bmAttributes.xfer == TUSB_XFER_BULK;
+
+#if defined(TUP_USBIP_MUSB_AM1802)
+  double_packet = false;
+#endif
 
   maxp_csr->maxp = mps;
   maxp_csr->csrh = 0;
-#if MUSB_CFG_SHARED_FIFO
+#if MUSB_CFG_SHARED_FIFO || defined(TUP_USBIP_MUSB_AM1802)
   if (epdir) {
     maxp_csr->csrh |= MUSB_CSRH_TX_MODE;
   }
@@ -779,8 +1171,17 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const * ep_desc) {
 
   hwfifo_flush(musb, epn, is_rx, true);
 
-  TU_ASSERT(hwfifo_config(musb, epn, is_rx, mps, ep_desc->bmAttributes.xfer == TUSB_XFER_BULK));
+  TU_ASSERT(hwfifo_config(musb, epn, is_rx, mps, double_packet));
   musb->intren_ep[is_rx] |= TU_BIT(epn);
+  musb_dcd_edpt_open_count++;
+  musb_dcd_edpt_open_last_ep_addr = ep_addr;
+  musb_dcd_edpt_open_last_mps = mps;
+  musb_dcd_edpt_open_last_xfer = ep_desc->bmAttributes.xfer;
+  musb_dcd_edpt_open_last_is_rx = is_rx;
+  musb_dcd_edpt_open_last_csrh = maxp_csr->csrh;
+  musb_dcd_edpt_open_last_double_packet = double_packet ? 1u : 0u;
+  musb_dcd_edpt_open_last_intr_txen = musb->intr_txen;
+  musb_dcd_edpt_open_last_intr_rxen = musb->intr_rxen;
 
   return true;
 }
@@ -817,7 +1218,7 @@ bool dcd_edpt_iso_activate(uint8_t rhport, tusb_desc_endpoint_t const *ep_desc )
 
   maxp_csr->maxp = mps;
   maxp_csr->csrh |= MUSB_CSRH_ISO;
-#if MUSB_CFG_SHARED_FIFO
+#if MUSB_CFG_SHARED_FIFO || defined(TUP_USBIP_MUSB_AM1802)
   if (dir_in) {
     maxp_csr->csrh |= MUSB_CSRH_TX_MODE;
   }
@@ -876,7 +1277,15 @@ bool dcd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t t
     ret = edpt_n_xfer(rhport, ep_addr, buffer, total_bytes, false, is_isr);
   } else {
     (void) is_isr;
+    musb_dcd_ep0_xfer_count++;
+    musb_dcd_ep0_xfer_last_ep_addr = ep_addr;
+    musb_dcd_ep0_xfer_last_len = total_bytes;
+    musb_dcd_ep0_xfer_last_state_before = _dcd.pipe0.state;
     ret = edpt0_xfer(rhport, ep_addr, buffer, total_bytes, is_isr);
+    musb_dcd_ep0_xfer_last_state_after = _dcd.pipe0.state;
+    musb_dcd_ep0_xfer_last_csr0l = get_ep_csr(MUSB_REGS(rhport), 0)->csr0l;
+    musb_dcd_ep0_xfer_last_remain_wlength = _dcd.pipe0.remain_wlength;
+    musb_dcd_ep0_xfer_last_result = ret ? 1u : 0u;
   }
 
   if (ie) {
@@ -912,6 +1321,8 @@ void dcd_edpt_stall(uint8_t rhport, uint8_t ep_addr) {
   if (0 == epn) {
     if (ep_addr == TU_EP0_OUT) { /* Ignore EP0 IN */
       pipe0_state_t* pipe0 = &_dcd.pipe0;
+      musb_dcd_ep0_stall_request_count++;
+      musb_dcd_ep0_stall_last_ep_addr = ep_addr;
       pipe0->state = PIPE0_STATE_IDLE;
       pipe0->buf = NULL;
       if (pipe0->deferred_setup_valid) {
@@ -924,6 +1335,7 @@ void dcd_edpt_stall(uint8_t rhport, uint8_t ep_addr) {
         pipe0->rxrdy_consumed = false;
         ep_csr->csr0l = MUSB_CSRL0_STALL;
       }
+      musb_dcd_ep0_state_current = pipe0->state;
     }
   } else {
     const tusb_dir_t ep_dir = tu_edpt_dir(ep_addr);
@@ -963,10 +1375,26 @@ void dcd_int_handler(uint8_t rhport) {
   //Part specific ISR setup/entry
   musb_dcd_int_handler_enter(rhport);
 
-  uint_fast8_t intr_usb = musb_regs->intr_usb; // a read will clear this interrupt status
-  uint_fast8_t intr_tx = musb_regs->intr_tx; // a read will clear this interrupt status
-  uint_fast8_t intr_rx = musb_regs->intr_rx; // a read will clear this interrupt status
+  uint_fast8_t intr_usb;
+  uint_fast8_t intr_tx;
+  uint_fast8_t intr_rx;
+
+#ifdef MUSB_DCD_INT_STATUS_PLATFORM
+  musb_dcd_int_status_get(rhport, &intr_usb, &intr_tx, &intr_rx);
+#else
+  intr_usb = musb_regs->intr_usb; // a read will clear this interrupt status
+  intr_tx = musb_regs->intr_tx; // a read will clear this interrupt status
+  intr_rx = musb_regs->intr_rx; // a read will clear this interrupt status
+#endif
   // TU_LOG1("D%2x T%2x R%2x\r\n", is, txis, rxis);
+
+#ifdef MUSB_DCD_INT_HANDLER_SNAPSHOT
+  musb_dcd_int_handler_snapshot(rhport, intr_usb, intr_tx, intr_rx);
+#endif
+
+  if ((intr_usb & MUSB_IS_SOF) && !(musb_regs->intr_usben & MUSB_IE_SOF)) {
+    musb_dcd_ignored_sof_count++;
+  }
 
   intr_usb &= musb_regs->intr_usben; /* Clear disabled interrupts */
   if (intr_usb & MUSB_IS_DISCON) {
