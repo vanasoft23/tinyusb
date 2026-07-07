@@ -108,6 +108,7 @@
 #define OPT_MCU_MSP432E4          510 ///< TI MSP432E4xx
 #define OPT_MCU_TM4C123           511 ///< TI Tiva-C 123x
 #define OPT_MCU_TM4C129           512 ///< TI Tiva-C 129x
+#define OPT_MCU_AM1802            522
 
 // ValentyUSB eptri
 #define OPT_MCU_VALENTYUSB_EPTRI  600 ///< Fomu eptri config
