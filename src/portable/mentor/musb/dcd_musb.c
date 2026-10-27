@@ -818,9 +818,18 @@ bool dcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   print_musb_info(musb_regs);
 #endif
 
-  musb_regs->intr_usben |= MUSB_IE_RESET | MUSB_IE_RESUME | MUSB_IE_SUSPND;
-  musb_dcd_int_clear(rhport);
+#ifdef MUSB_DCD_PHY_INIT_RETURNS_BOOL
+  TU_VERIFY(musb_dcd_phy_init(rhport));
+#else
   musb_dcd_phy_init(rhport);
+#endif
+  musb_dcd_int_clear(rhport);
+
+  uint8_t intr_usben = MUSB_IE_RESET | MUSB_IE_RESUME | MUSB_IE_SUSPND;
+#ifdef MUSB_DCD_HAS_DISCONNECT_INTERRUPT
+  intr_usben |= MUSB_IE_DISCON;
+#endif
+  musb_regs->intr_usben |= intr_usben;
   dcd_connect(rhport);
   return true;
 }
@@ -1120,8 +1129,11 @@ void dcd_int_handler(uint8_t rhport) {
   // TU_LOG1("D%2x T%2x R%2x\r\n", is, txis, rxis);
 
   intr_usb &= musb_regs->intr_usben; /* Clear disabled interrupts */
+#ifdef MUSB_DCD_HAS_DISCONNECT_INTERRUPT
   if (intr_usb & MUSB_IS_DISCON) {
+    dcd_event_bus_signal(rhport, DCD_EVENT_UNPLUGGED, true);
   }
+#endif
   if (intr_usb & MUSB_IS_SOF) {
     dcd_event_bus_signal(rhport, DCD_EVENT_SOF, true);
   }
