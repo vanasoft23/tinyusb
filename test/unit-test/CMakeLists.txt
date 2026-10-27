@@ -115,6 +115,13 @@ add_ceedling_test(
   )
 
 add_ceedling_test(
+  test_cdc_device_private
+  ${CEEDLING_WORKDIR}/test/device/cdc/test_cdc_device_private.c
+  ""
+  ""
+  )
+
+add_ceedling_test(
   test_usbd
   ${CEEDLING_WORKDIR}/test/device/usbd/test_usbd.c
   "${CEEDLING_WORKDIR}/../../src/tusb.c;${CEEDLING_WORKDIR}/../../src/device/usbd.c;${CEEDLING_WORKDIR}/../../src/common/tusb_fifo.c"
