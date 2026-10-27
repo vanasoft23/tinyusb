@@ -32,6 +32,7 @@
 #include "device/usbd_pvt.h"
 
 #include "cdc_device.h"
+#include "cdc_device_pvt.h"
 
 // Level where CFG_TUSB_DEBUG must be at least for this driver is logged
 #ifndef CFG_TUD_CDC_LOG_LEVEL
@@ -79,6 +80,12 @@ CFG_TUD_MEM_SECTION static cdcd_epbuf_t _cdcd_epbuf[CFG_TUD_CDC];
 //--------------------------------------------------------------------+
 // Weak stubs: invoked if no strong implementation is available
 //--------------------------------------------------------------------+
+TU_ATTR_WEAK void tud_cdc_rx_isr_cb(uint8_t itf, const uint8_t *buffer, uint32_t bufsize) {
+  (void)itf;
+  (void)buffer;
+  (void)bufsize;
+}
+
 TU_ATTR_WEAK void tud_cdc_rx_cb(uint8_t itf) {
   (void)itf;
 }
@@ -529,6 +536,45 @@ bool cdcd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
   }
 
   return true;
+}
+
+bool cdcd_xfer_isr(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes) {
+  (void) rhport;
+
+  if ((result != XFER_RESULT_SUCCESS) || (xferred_bytes == 0)) {
+    return false;
+  }
+
+  uint8_t itf = find_cdc_itf(ep_addr);
+  TU_ASSERT(itf < CFG_TUD_CDC);
+  cdcd_interface_t *p_cdc     = &_cdcd_itf[itf];
+  tu_edpt_stream_t *stream_rx = &p_cdc->rx_stream;
+
+  if (ep_addr != stream_rx->ep_addr) {
+    return false;
+  }
+
+  TU_ASSERT(xferred_bytes <= stream_rx->xfer_len);
+
+  if (stream_rx->ep_buf != NULL) {
+    tud_cdc_rx_isr_cb(itf, stream_rx->ep_buf, xferred_bytes);
+    return false;
+  }
+
+  tu_fifo_buffer_info_t read_info;
+  tu_fifo_buffer_info_t xfer_info;
+  tu_fifo_get_read_info(&stream_rx->ff, &read_info);
+  TU_ASSERT(cdcd_get_rx_xfer_info(&read_info, xferred_bytes, &xfer_info));
+
+  if (xfer_info.linear.len > 0) {
+    tud_cdc_rx_isr_cb(itf, xfer_info.linear.ptr, xfer_info.linear.len);
+  }
+
+  if (xfer_info.wrapped.len > 0) {
+    tud_cdc_rx_isr_cb(itf, xfer_info.wrapped.ptr, xfer_info.wrapped.len);
+  }
+
+  return false;
 }
 
 #endif

@@ -270,6 +270,9 @@ TU_ATTR_ALWAYS_INLINE static inline bool tud_cdc_write_clear(void) {
 // Application Callback API
 //--------------------------------------------------------------------+
 
+// Invoked when received new data in ISR
+void tud_cdc_rx_isr_cb(uint8_t itf, const uint8_t *buffer, uint32_t bufsize);
+
 // Invoked when received new data
 void tud_cdc_rx_cb(uint8_t itf);
 
@@ -303,6 +306,7 @@ void     cdcd_reset           (uint8_t rhport);
 uint16_t cdcd_open            (uint8_t rhport, tusb_desc_interface_t const * itf_desc, uint16_t max_len);
 bool     cdcd_control_xfer_cb (uint8_t rhport, uint8_t stage, tusb_control_request_t const * request);
 bool     cdcd_xfer_cb         (uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes);
+bool     cdcd_xfer_isr        (uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes);
 
 #ifdef __cplusplus
  }

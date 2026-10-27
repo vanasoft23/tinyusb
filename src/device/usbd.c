@@ -179,7 +179,7 @@ static const usbd_class_driver_t _usbd_driver[] = {
         .open             = cdcd_open,
         .control_xfer_cb  = cdcd_control_xfer_cb,
         .xfer_cb          = cdcd_xfer_cb,
-        .xfer_isr         = NULL,
+        .xfer_isr         = cdcd_xfer_isr, // needed by GDB stub
         .sof              = NULL
     },
     #endif
